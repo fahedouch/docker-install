@@ -10,47 +10,62 @@ set -e
 #   $ sh get-docker.sh
 #
 # NOTE: Make sure to verify the contents of the script
-#       you downloaded matches the contents of install.sh
+#       you downloaded matches the contents of rootless-install.sh
 #       located at https://github.com/docker/docker-install
 #       before executing.
 #
 # Git commit from https://github.com/docker/docker-install when
 # the script was uploaded (Should only be modified by upload job):
-SCRIPT_COMMIT_SHA=UNKNOWN
+SCRIPT_COMMIT_SHA="$LOAD_SCRIPT_COMMIT_SHA"
 
 # This script should be run with an unprivileged user and install/setup Docker under $HOME/bin/.
 
+# latest version available in the stable channel.
+STABLE_LATEST="$LOAD_SCRIPT_STABLE_LATEST"
+
+# latest version available in the test channel.
+TEST_LATEST="$LOAD_SCRIPT_TEST_LATEST"
+
 # The channel to install from:
-#   * nightly
 #   * test
 #   * stable
 DEFAULT_CHANNEL_VALUE="stable"
 if [ -z "$CHANNEL" ]; then
 	CHANNEL=$DEFAULT_CHANNEL_VALUE
 fi
-# The latest release is currently hard-coded.
-STABLE_LATEST="23.0.1"
-TEST_LATEST="23.0.1"
+
 STATIC_RELEASE_URL=
 STATIC_RELEASE_ROOTLESS_URL=
+
+# static_release_url returns the download URL for a given package and version.
+# Some releases use a different tarball name than the version number (e.g. a
+# re-release with a suffix), which is handled here.
+# Usage: static_release_url <docker|docker-rootless-extras> <version>
+static_release_url() {
+	case "$2" in
+		29.4.2)
+			echo "https://download.docker.com/linux/static/$CHANNEL/$(uname -m)/$1-29.4.2-2.tgz"
+			;;
+		*)
+			echo "https://download.docker.com/linux/static/$CHANNEL/$(uname -m)/$1-$2.tgz"
+			;;
+	esac
+}
+
 case "$CHANNEL" in
     "stable")
         echo "# Installing stable version ${STABLE_LATEST}"
-        STATIC_RELEASE_URL="https://download.docker.com/linux/static/$CHANNEL/$(uname -m)/docker-${STABLE_LATEST}.tgz"
-        STATIC_RELEASE_ROOTLESS_URL="https://download.docker.com/linux/static/$CHANNEL/$(uname -m)/docker-rootless-extras-${STABLE_LATEST}.tgz"
+        STATIC_RELEASE_URL=$(static_release_url docker "$STABLE_LATEST")
+        STATIC_RELEASE_ROOTLESS_URL=$(static_release_url docker-rootless-extras "$STABLE_LATEST")
         ;;
     "test")
         echo "# Installing test version ${TEST_LATEST}"
-        STATIC_RELEASE_URL="https://download.docker.com/linux/static/$CHANNEL/$(uname -m)/docker-${TEST_LATEST}.tgz"
-        STATIC_RELEASE_ROOTLESS_URL="https://download.docker.com/linux/static/$CHANNEL/$(uname -m)/docker-rootless-extras-${TEST_LATEST}.tgz"
-        ;;
-    "nightly")
-        echo "# Installing nightly"
-        STATIC_RELEASE_URL="https://master.dockerproject.org/linux/$(uname -m)/docker.tgz"
-        STATIC_RELEASE_ROOTLESS_URL="https://master.dockerproject.org/linux/$(uname -m)/docker-rootless-extras.tgz"
+        STATIC_RELEASE_URL=$(static_release_url docker "$TEST_LATEST")
+        STATIC_RELEASE_ROOTLESS_URL=$(static_release_url docker-rootless-extras "$TEST_LATEST")
         ;;
     *)
-        >&2 echo "Aborting because of unknown CHANNEL \"$CHANNEL\". Set \$CHANNEL to either \"stable\", \"test\", or \"nightly\"."; exit 1
+        >&2 echo "Aborting because of unknown CHANNEL \"$CHANNEL\". Set \$CHANNEL to either \"stable\" or \"test\"."
+        exit 1
         ;;
 esac
 
@@ -129,12 +144,12 @@ checks() {
 	# uidmap dependency check
 	if ! command -v newuidmap >/dev/null 2>&1; then
 		if command -v apt-get >/dev/null 2>&1; then
-			INSTRUCTIONS="apt-get install -y uidmap"
+			INSTRUCTIONS="apt-get -y install uidmap"
 		elif command -v dnf >/dev/null 2>&1; then
-			INSTRUCTIONS="dnf install -y shadow-utils"
+			INSTRUCTIONS="dnf -y install shadow-utils"
 		elif command -v yum >/dev/null 2>&1; then
 			INSTRUCTIONS="curl -o /etc/yum.repos.d/vbatts-shadow-utils-newxidmap-epel-7.repo https://copr.fedorainfracloud.org/coprs/vbatts/shadow-utils-newxidmap/repo/epel-7/vbatts-shadow-utils-newxidmap-epel-7.repo
-yum install -y shadow-utils46-newxidmap"
+yum -y install shadow-utils46-newxidmap"
 		else
 			echo "newuidmap binary not found. Please install with a package manager."
 			exit 1
@@ -142,13 +157,14 @@ yum install -y shadow-utils46-newxidmap"
 	fi
 
 	# iptables dependency check
-	if [ -z "$SKIP_IPTABLES" ] && ! command -v iptables >/dev/null 2>&1 && [ ! -f /sbin/iptables ] && [ ! -f /usr/sbin/iptables ]; then
+	iptables_command=$(PATH=$PATH:/sbin:/usr/sbin command -v iptables 2> /dev/null) || :
+	if [ -z "$SKIP_IPTABLES" ] && [ -z "$iptables_command" ]; then
 		if command -v apt-get >/dev/null 2>&1; then
 			INSTRUCTIONS="${INSTRUCTIONS}
-apt-get install -y iptables"
+apt-get -y install iptables"
 		elif command -v dnf >/dev/null 2>&1; then
 			INSTRUCTIONS="${INSTRUCTIONS}
-dnf install -y iptables"
+dnf -y install iptables"
 		else
 			echo "iptables binary not found. Please install with a package manager."
 			exit 1
@@ -156,9 +172,24 @@ dnf install -y iptables"
 	fi
 
 	# ip_tables module dependency check
-	if [ -z "$SKIP_IPTABLES" ] && ! lsmod | grep ip_tables >/dev/null 2>&1 && ! grep -q ip_tables "/lib/modules/$(uname -r)/modules.builtin"; then
+	#
+	# some systems use nf_tables instead of ip_tables
+	# so we set nf_tables as the default and check iptables --version
+	# to find out if client is using nf_tables
+	# note that iptables --version doesn't check currently loaded
+	# modules, it just outputs what it was compiled for
+	# we do not check further to avoid complex logic
+	#
+	# https://github.com/moby/moby/blob/864598f8c2677189e308eb4a3b3c0dd41fc06599/contrib/dockerd-rootless-setuptool.sh
+	# uses the same logic
+	iptables_module="nf_tables"
+	if [ -z "$SKIP_IPTABLES" ] && [ -n "$iptables_command" ] && "$iptables_command" --version | grep -q "legacy"; then
+		iptables_module="ip_tables"
+	fi
+
+	if [ -z "$SKIP_IPTABLES" ] && ! lsmod | grep -q "$iptables_module" && ! grep -q "$iptables_module" "/lib/modules/$(uname -r)/modules.builtin"; then
 			INSTRUCTIONS="${INSTRUCTIONS}
-modprobe ip_tables"
+modprobe $iptables_module"
 	fi
 
 	# debian requires setting unprivileged_userns_clone

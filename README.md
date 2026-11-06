@@ -16,12 +16,14 @@ From `https://get.docker.com`:
 ```shell
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
+rm get-docker.sh
 ```
 
 From `https://test.docker.com`:
 ```shell
 curl -fsSL https://test.docker.com -o test-docker.sh
 sh test-docker.sh
+rm test-docker.sh
 ```
 
 From the source repo (This will install latest from the `stable` channel):
@@ -66,3 +68,11 @@ ruling it out in the future.
 
 docker/docker-install is licensed under the Apache License, Version 2.0.
 See [LICENSE](LICENSE) for the full license text.
+
+## Contributing
+
+Make sure you have read and understood our [contributing
+guidelines](https://github.com/docker/cli/blob/master/CONTRIBUTING.md).
+
+**Make sure all your commits are signed off and include a signature generated
+with `git commit -s`.**

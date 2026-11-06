@@ -9,15 +9,44 @@ jobs:
     strategy:
       matrix:
         os:
-          - ubuntu:18.04
-          - centos:7
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - quay.io/centos/centos:stream9
         version:
-          - 19.03
+          - "27.5"
+          - "29.4.2"
           - ""
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
     - name: Shellcheck
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: make shellcheck
     - name: Check distribution
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: TEST_IMAGE=${{ matrix.os }} VERSION=${{ matrix.version }} make test
+
+  # This is a separate workflow step, because we need to check it outside of container (due to lsmod, iptables checks)
+  test-install-rootless:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        channel:
+          - test
+          - stable
+        include:
+          - channel: stable
+            stable_latest: "29.4.2"
+    steps:
+    - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
+    - name: Install rootless
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        sudo sh -c 'echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns'
+        make build/${{ matrix.channel }}/rootless-install.sh \
+          ${{ matrix.stable_latest && format('STABLE_LATEST={0}', matrix.stable_latest) || '' }}
+        FORCE_ROOTLESS_INSTALL=1 ./build/${{ matrix.channel }}/rootless-install.sh
